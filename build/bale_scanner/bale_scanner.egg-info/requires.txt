@@ -1,6 +1,0 @@
-numpy
-open3d
-setuptools
-
-[test]
-pytest

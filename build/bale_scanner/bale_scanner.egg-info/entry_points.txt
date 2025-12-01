@@ -1,0 +1,5 @@
+[console_scripts]
+bale_reconstructor = bale_scanner.bale_reconstructor:main
+bale_visualizer = bale_scanner.bale_visualizer:main
+test = bale_scanner.test:main
+

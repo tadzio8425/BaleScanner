@@ -1,0 +1,6 @@
+source;share/bale_scanner/hook/pythonpath.ps1
+source;share/bale_scanner/hook/pythonpath.dsv
+source;share/bale_scanner/hook/pythonpath.sh
+source;share/bale_scanner/hook/ament_prefix_path.ps1
+source;share/bale_scanner/hook/ament_prefix_path.dsv
+source;share/bale_scanner/hook/ament_prefix_path.sh

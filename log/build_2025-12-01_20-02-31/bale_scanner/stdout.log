@@ -1,0 +1,24 @@
+running egg_info
+writing build/bale_scanner/bale_scanner.egg-info/PKG-INFO
+writing dependency_links to build/bale_scanner/bale_scanner.egg-info/dependency_links.txt
+writing entry points to build/bale_scanner/bale_scanner.egg-info/entry_points.txt
+writing requirements to build/bale_scanner/bale_scanner.egg-info/requires.txt
+writing top-level names to build/bale_scanner/bale_scanner.egg-info/top_level.txt
+reading manifest file 'build/bale_scanner/bale_scanner.egg-info/SOURCES.txt'
+writing manifest file 'build/bale_scanner/bale_scanner.egg-info/SOURCES.txt'
+running build
+running build_py
+copying bale_scanner/bale_visualizer.py -> /home/tatan/fis_ws/src/bale_scanner/build/bale_scanner/build/lib/bale_scanner
+running install
+running install_lib
+copying /home/tatan/fis_ws/src/bale_scanner/build/bale_scanner/build/lib/bale_scanner/bale_visualizer.py -> /home/tatan/fis_ws/src/bale_scanner/install/bale_scanner/lib/python3.10/site-packages/bale_scanner
+byte-compiling /home/tatan/fis_ws/src/bale_scanner/install/bale_scanner/lib/python3.10/site-packages/bale_scanner/bale_visualizer.py to bale_visualizer.cpython-310.pyc
+running install_data
+running install_egg_info
+removing '/home/tatan/fis_ws/src/bale_scanner/install/bale_scanner/lib/python3.10/site-packages/bale_scanner-0.0.0-py3.10.egg-info' (and everything under it)
+Copying build/bale_scanner/bale_scanner.egg-info to /home/tatan/fis_ws/src/bale_scanner/install/bale_scanner/lib/python3.10/site-packages/bale_scanner-0.0.0-py3.10.egg-info
+running install_scripts
+Installing bale_reconstructor script to /home/tatan/fis_ws/src/bale_scanner/install/bale_scanner/lib/bale_scanner
+Installing bale_visualizer script to /home/tatan/fis_ws/src/bale_scanner/install/bale_scanner/lib/bale_scanner
+Installing test script to /home/tatan/fis_ws/src/bale_scanner/install/bale_scanner/lib/bale_scanner
+writing list of installed files to '/home/tatan/fis_ws/src/bale_scanner/build/bale_scanner/install.log'

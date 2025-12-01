@@ -26,7 +26,7 @@ class BaleExporter(Node):
 
         # --- Parameters ---
         self.declare_parameter('output_dir', '~/bale_scans')
-        self.declare_parameter('voxel_size', 0.01)  # 0 to disable
+        self.declare_parameter('voxel_size', 0.005)  # 0 to disable
         self.declare_parameter('remove_outliers', False)
         self.declare_parameter('nb_neighbors', 20)
         self.declare_parameter('std_ratio', 2.0)
@@ -57,6 +57,25 @@ class BaleExporter(Node):
         self.create_subscription(Bool, '/bale/finished', self.finished_callback, 10)
 
         self.get_logger().info(f"BaleExporter ready. Output: {self.output_dir}")
+
+    def isolate_bale(self, pcd: o3d.geometry.PointCloud) -> o3d.geometry.PointCloud:
+        """
+        Isolate the main bale by clustering and keeping the largest cluster.
+        """
+        if len(pcd.points) == 0:
+            return pcd
+
+        labels = np.array(pcd.cluster_dbscan(eps=0.07, min_points=5, print_progress=False))
+        if labels.size == 0 or labels.max() < 0:
+            self.get_logger().warn("No clusters found, exporting full cloud.")
+            return pcd
+
+        # Keep only the largest cluster
+        largest_label = np.bincount(labels[labels >= 0]).argmax()
+        indices = np.where(labels == largest_label)[0]
+        isolated_pcd = pcd.select_by_index(indices)
+        self.get_logger().info(f"Isolated bale: {len(isolated_pcd.points):,} points in largest cluster")
+        return isolated_pcd
 
     def cloud_callback(self, msg: PointCloud2):
         with self.lock:
@@ -109,6 +128,11 @@ class BaleExporter(Node):
             pcd = o3d.geometry.PointCloud()
             pcd.points = o3d.utility.Vector3dVector(xyz)
 
+            
+            # Isolate the bale!
+            pcd = self.isolate_bale(pcd)
+            
+
             self.get_logger().info(f"Raw final bale: {len(xyz):,} points")
 
             # --- 2. Optional outlier removal ---
@@ -134,6 +158,20 @@ class BaleExporter(Node):
             if len(pcd.points) > 3:
                 pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
                 pcd.orient_normals_consistent_tangent_plane(30)
+
+
+            # --- 4.1. Measure! ---
+            aabb = pcd.get_axis_aligned_bounding_box()
+            bbox_extent = aabb.get_extent()
+            center = pcd.get_center()
+            volume_aabb = np.prod(bbox_extent)
+
+            self.get_logger().info(
+                f"Bale measurements - Dimensions (X,Y,Z): "
+                f"{bbox_extent[0]:.3f} x {bbox_extent[1]:.3f} x {bbox_extent[2]:.3f} m, "
+                f"Volume (AABB): {volume_aabb:.3f} m³, "
+                f"Center: {center}"
+            )
 
             # --- 5. Save PCD and PLY ---
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

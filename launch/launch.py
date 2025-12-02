@@ -34,7 +34,7 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='base_frame_to_right_frame_tf',
         arguments=[
-            '-0.06995', '0.68064', '2.43719',
+            '-0.06995', '2.04064', '2.43719',
             '1.5708', '-1.0472','0',
             'base_frame', 'right_frame'
         ]

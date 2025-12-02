@@ -18,11 +18,11 @@ class BaleReconstructor(Node):
 
     # Configuration constants
     CONVEYOR_VELOCITY = 0.3           # m/s along X-axis
-    RIGHT_LIDAR_Y_OFFSET = 1.36128    # meters (lateral offset between lidars)
+    RIGHT_LIDAR_Y_OFFSET = 1.36128 + 1.36    # meters (lateral offset between lidars)
     SYNC_SLOP = 0.05                  # seconds - max time difference for approximate sync
     QUEUE_SIZE = 10
     STATIC_LEARNING_TIME = 8           # seconds - time for learning the static map
-    SCAN_DURATION = 80
+    SCAN_DURATION = 120
 
     def __init__(self):
         super().__init__('bale_reconstructor')

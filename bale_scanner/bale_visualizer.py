@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-bale_exporter.py
-Exports the final bale point cloud when /bale/finished is received.
+Modified bale_exporter.py
+Exports **two separate bales** when a reconstruction contains two clusters.
 - No accumulation between bales.
 - Optional outlier removal.
 - Optional voxel downsampling.
 - Optional Poisson mesh creation.
+- If two bales are found, exports **A** and **B** independently.
 """
 
 import rclpy
@@ -33,12 +34,10 @@ class BaleExporter(Node):
         self.declare_parameter('export_ply', True)
         self.declare_parameter('create_poisson_mesh', False)
 
-        # Expand output dir
         output_dir = self.get_parameter('output_dir').get_parameter_value().string_value
         self.output_dir = os.path.expanduser(output_dir)
         os.makedirs(self.output_dir, exist_ok=True)
 
-        # Read parameters
         self.voxel_size = self.get_parameter('voxel_size').get_parameter_value().double_value
         self.remove_outliers = self.get_parameter('remove_outliers').get_parameter_value().bool_value
         self.nb_neighbors = self.get_parameter('nb_neighbors').get_parameter_value().integer_value
@@ -46,189 +45,116 @@ class BaleExporter(Node):
         self.export_ply = self.get_parameter('export_ply').get_parameter_value().bool_value
         self.create_poisson_mesh = self.get_parameter('create_poisson_mesh').get_parameter_value().bool_value
 
-        # --- State ---
-        self.current_cloud: PointCloud2 | None = None
+        self.current_cloud = None
         self.cloud_ready = False
         self.export_triggered = False
         self.lock = threading.Lock()
 
-        # --- Subscriptions ---
         self.create_subscription(PointCloud2, '/bale/reconstruction', self.cloud_callback, 10)
         self.create_subscription(Bool, '/bale/finished', self.finished_callback, 10)
 
         self.get_logger().info(f"BaleExporter ready. Output: {self.output_dir}")
 
-    def isolate_bale(self, pcd: o3d.geometry.PointCloud) -> o3d.geometry.PointCloud:
-        """
-        Isolate the two main bales by clustering and keeping the two largest clusters.
-        """
+    def cluster_bales(self, pcd):
         if len(pcd.points) == 0:
-            return pcd
+            return []
 
-        labels = np.array(
-            pcd.cluster_dbscan(eps=0.07, min_points=5, print_progress=False)
-        )
+        labels = np.array(pcd.cluster_dbscan(eps=0.07, min_points=5, print_progress=False))
 
-        if labels.size == 0 or labels.max() < 0:
-            self.get_logger().warn("No clusters found, exporting full cloud.")
-            return pcd
+        if labels.max() < 0:
+            self.get_logger().warn("No clusters found. Exporting whole cloud as Bale A only.")
+            return [pcd]
 
-        # Count only valid (non -1) clusters
-        valid_labels = labels[labels >= 0]
-        counts = np.bincount(valid_labels)
+        valid = labels[labels >= 0]
+        counts = np.bincount(valid)
 
-        # If only 1 cluster exists, fall back to previous behavior
         if len(counts) == 1:
-            largest_label = np.argmax(counts)
-            indices = np.where(labels == largest_label)[0]
-            self.get_logger().info(
-                f"Only one cluster found. Keeping it ({len(indices):,} points)."
-            )
-            return pcd.select_by_index(indices)
+            self.get_logger().warn("Only one bale detected.")
+            idx = np.where(labels == 0)[0]
+            return [pcd.select_by_index(idx)]
 
-        # --- Find the two largest clusters ---
-        largest_two = counts.argsort()[-2:][::-1]  # labels of the two largest clusters
+        largest_two = counts.argsort()[-2:][::-1]
+        self.get_logger().info(f"Two bales detected: clusters {largest_two}")
 
-        indices = np.where(np.isin(labels, largest_two))[0]
-        isolated_pcd = pcd.select_by_index(indices)
+        bale_pcds = []
+        for label in largest_two:
+            idx = np.where(labels == label)[0]
+            bale_pcds.append(pcd.select_by_index(idx))
+            self.get_logger().info(f"Cluster {label}: {len(idx)} points")
 
-        self.get_logger().info(
-            f"Isolated two bales: kept {len(indices):,} points (clusters {largest_two})"
-        )
+        return bale_pcds
 
-        return isolated_pcd
-
-
-    def cloud_callback(self, msg: PointCloud2):
+    def cloud_callback(self, msg):
         with self.lock:
             self.current_cloud = msg
             self.cloud_ready = True
 
-            # Optional throttled logging
-            try:
-                points = point_cloud2.read_points_numpy(msg, field_names=("x", "y", "z"), skip_nans=True)
-                self.get_logger().info(
-                    f"Updated bale cloud: {len(points):,} points",
-                    throttle_duration_sec=3.0
-                )
-            except:
-                pass
-
-    def finished_callback(self, msg: Bool):
+    def finished_callback(self, msg):
         if not msg.data:
             return
 
         with self.lock:
             if self.export_triggered:
-                self.get_logger().warn(
-                    "Export already in progress or done for this bale. Ignoring duplicate /bale/finished."
-                )
+                self.get_logger().warn("Duplicate /bale/finished ignored.")
                 return
-            if not self.cloud_ready or self.current_cloud is None:
-                self.get_logger().error("Bale finished but no cloud received yet!")
+            if not self.cloud_ready:
+                self.get_logger().error("/bale/finished received but no cloud yet.")
                 return
 
-            # Capture the cloud AT THE MOMENT of finish
-            cloud_to_export = self.current_cloud
+            cloud = self.current_cloud
             self.export_triggered = True
 
-        self.get_logger().info("Bale finished → exporting in background thread...")
-        thread = threading.Thread(target=self.export_bale, args=(cloud_to_export,))
-        thread.start()
+        threading.Thread(target=self.export_bales, args=(cloud,)).start()
 
-    def export_bale(self, cloud_msg: PointCloud2):
+    def export_bales(self, cloud_msg):
         try:
-            # --- 1. Read points ---
-            points_np = point_cloud2.read_points_numpy(
-                cloud_msg, field_names=("x", "y", "z"), skip_nans=True
-            )
-            if points_np.size == 0:
-                self.get_logger().warn("Received empty cloud. Skipping export.")
-                return
+            arr = point_cloud2.read_points_numpy(cloud_msg, field_names=("x","y","z"), skip_nans=True)
+            pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(arr))
 
-            xyz = np.array(points_np, dtype=np.float64)
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(xyz)
+            bales = self.cluster_bales(pcd)
 
-            
-            # Isolate the bale!
-            pcd = self.isolate_bale(pcd)
-            
-
-            self.get_logger().info(f"Raw final bale: {len(xyz):,} points")
-
-            # --- 2. Optional outlier removal ---
-            if self.remove_outliers and len(xyz) > self.nb_neighbors:
-                cl, ind = pcd.remove_statistical_outlier(
-                    nb_neighbors=self.nb_neighbors,
-                    std_ratio=self.std_ratio
-                )
-                removed_points = len(pcd.points) - len(ind)
-                pcd = pcd.select_by_index(ind)
-                self.get_logger().info(
-                    f"After outlier removal: {len(pcd.points):,} points ({removed_points:,} removed)"
-                )
-
-            # --- 3. Optional voxel downsampling ---
-            if self.voxel_size > 0:
-                pcd = pcd.voxel_down_sample(self.voxel_size)
-                self.get_logger().info(
-                    f"After {self.voxel_size*100:.1f}cm downsampling: {len(pcd.points):,} points"
-                )
-
-            # --- 4. Estimate normals for PLY export ---
-            if len(pcd.points) > 3:
-                pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
-                pcd.orient_normals_consistent_tangent_plane(30)
-
-
-            # --- 4.1. Measure! ---
-            aabb = pcd.get_axis_aligned_bounding_box()
-            bbox_extent = aabb.get_extent()
-            center = pcd.get_center()
-            volume_aabb = np.prod(bbox_extent)
-
-            self.get_logger().info(
-                f"Bale measurements - Dimensions (X,Y,Z): "
-                f"{bbox_extent[0]:.3f} x {bbox_extent[1]:.3f} x {bbox_extent[2]:.3f} m, "
-                f"Volume (AABB): {volume_aabb:.3f} m³, "
-                f"Center: {center}"
-            )
-
-            # --- 5. Save PCD and PLY ---
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            base_name = f"bale_{timestamp}"
-            pcd_path = os.path.join(self.output_dir, f"{base_name}.pcd")
-            ply_path = os.path.join(self.output_dir, f"{base_name}.ply")
+            labels = ["A", "B"]
 
-            o3d.io.write_point_cloud(pcd_path, pcd, write_ascii=False)
-            self.get_logger().info(f"Saved PCD: {pcd_path}")
+            for i, bale in enumerate(bales):
+                tag = labels[i] if i < 2 else f"extra{i}"
 
-            if self.export_ply:
-                if not pcd.has_colors():
-                    pcd.paint_uniform_color([0.8, 0.7, 0.2])
-                o3d.io.write_point_cloud(ply_path, pcd)
-                self.get_logger().info(f"Saved PLY: {ply_path}")
+                if self.remove_outliers and len(bale.points) > self.nb_neighbors:
+                    _, ind = bale.remove_statistical_outlier(self.nb_neighbors, self.std_ratio)
+                    bale = bale.select_by_index(ind)
 
-            # --- 6. Optional Poisson mesh ---
-            if self.create_poisson_mesh:
-                mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=9)
-                mesh_path = os.path.join(self.output_dir, f"{base_name}_mesh.ply")
-                o3d.io.write_triangle_mesh(mesh_path, mesh)
-                self.get_logger().info(f"Saved Poisson mesh: {mesh_path}")
+                if self.voxel_size > 0:
+                    bale = bale.voxel_down_sample(self.voxel_size)
+
+                if len(bale.points) > 3:
+                    bale.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
+
+                ext = bale.get_axis_aligned_bounding_box().get_extent()
+                vol = np.prod(ext)
+                ctr = bale.get_center()
+                self.get_logger().info(
+                    f"Bale {tag}: {len(bale.points)} pts, Size=({ext[0]:.3f},{ext[1]:.3f},{ext[2]:.3f}), Vol={vol:.3f}, Ctr={ctr}"
+                )
+
+                base = f"bale_{timestamp}_{tag}"
+                pcd_path = os.path.join(self.output_dir, f"{base}.pcd")
+                ply_path = os.path.join(self.output_dir, f"{base}.ply")
+
+                o3d.io.write_point_cloud(pcd_path, bale)
+                self.get_logger().info(f"Saved: {pcd_path}")
+
+                if self.export_ply:
+                    o3d.io.write_point_cloud(ply_path, bale)
+                    self.get_logger().info(f"Saved: {ply_path}")
 
         except Exception as e:
-            self.get_logger().error(f"Export failed: {e}")
-            import traceback
-            traceback.print_exc()
+            self.get_logger().error(f"Export error: {e}")
         finally:
-            # --- 7. Reset state ---
             with self.lock:
                 self.current_cloud = None
                 self.cloud_ready = False
                 self.export_triggered = False
-
-            self.get_logger().info("Export finished and state reset for next bale.")
+            self.get_logger().info("Export finished → ready for next bale.")
 
 
 def main(args=None):
@@ -237,7 +163,7 @@ def main(args=None):
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info("Shutting down bale_exporter...")
+        pass
     finally:
         node.destroy_node()
         rclpy.shutdown()

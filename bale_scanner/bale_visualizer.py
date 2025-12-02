@@ -60,22 +60,44 @@ class BaleExporter(Node):
 
     def isolate_bale(self, pcd: o3d.geometry.PointCloud) -> o3d.geometry.PointCloud:
         """
-        Isolate the main bale by clustering and keeping the largest cluster.
+        Isolate the two main bales by clustering and keeping the two largest clusters.
         """
         if len(pcd.points) == 0:
             return pcd
 
-        labels = np.array(pcd.cluster_dbscan(eps=0.07, min_points=5, print_progress=False))
+        labels = np.array(
+            pcd.cluster_dbscan(eps=0.07, min_points=5, print_progress=False)
+        )
+
         if labels.size == 0 or labels.max() < 0:
             self.get_logger().warn("No clusters found, exporting full cloud.")
             return pcd
 
-        # Keep only the largest cluster
-        largest_label = np.bincount(labels[labels >= 0]).argmax()
-        indices = np.where(labels == largest_label)[0]
+        # Count only valid (non -1) clusters
+        valid_labels = labels[labels >= 0]
+        counts = np.bincount(valid_labels)
+
+        # If only 1 cluster exists, fall back to previous behavior
+        if len(counts) == 1:
+            largest_label = np.argmax(counts)
+            indices = np.where(labels == largest_label)[0]
+            self.get_logger().info(
+                f"Only one cluster found. Keeping it ({len(indices):,} points)."
+            )
+            return pcd.select_by_index(indices)
+
+        # --- Find the two largest clusters ---
+        largest_two = counts.argsort()[-2:][::-1]  # labels of the two largest clusters
+
+        indices = np.where(np.isin(labels, largest_two))[0]
         isolated_pcd = pcd.select_by_index(indices)
-        self.get_logger().info(f"Isolated bale: {len(isolated_pcd.points):,} points in largest cluster")
+
+        self.get_logger().info(
+            f"Isolated two bales: kept {len(indices):,} points (clusters {largest_two})"
+        )
+
         return isolated_pcd
+
 
     def cloud_callback(self, msg: PointCloud2):
         with self.lock:

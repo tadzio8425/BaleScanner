@@ -21,8 +21,8 @@ class BaleReconstructor(Node):
     RIGHT_LIDAR_Y_OFFSET = 1.36128 + 1.36    # meters (lateral offset between lidars)
     SYNC_SLOP = 0.05                  # seconds - max time difference for approximate sync
     QUEUE_SIZE = 10
-    STATIC_LEARNING_TIME = 8           # seconds - time for learning the static map
     SCAN_DURATION = 120
+    DISTANCE_THRESHOLD = 0.10         # meters - points closer than this to static map are filtered
 
     def __init__(self):
         super().__init__('bale_reconstructor')
@@ -30,6 +30,25 @@ class BaleReconstructor(Node):
         # Subscribers (wrapped for message_filters)
         self.left_sub = Subscriber(self, PointCloud2, '/lidar/left')
         self.right_sub = Subscriber(self, PointCloud2, '/lidar/right')
+
+        # Publisher for merged cloud (for static map builder)
+        self.merged_pub = self.create_publisher(PointCloud2, '/lidar/merged', 10)
+
+        # Subscriber for static map (received once from static map builder)
+        self.static_map_sub = self.create_subscription(
+            PointCloud2,
+            '/static_map',
+            self.static_map_callback,
+            10
+        )
+
+        # Subscriber for static map ready signal
+        self.static_ready_sub = self.create_subscription(
+            Bool,
+            '/static_map/ready',
+            self.static_ready_callback,
+            10
+        )
 
         # Publisher to signal when bale is fully scanned
         self.done_pub = self.create_publisher(Bool, '/bale/finished', 10)
@@ -42,7 +61,6 @@ class BaleReconstructor(Node):
             slop=self.SYNC_SLOP,
         )
         self.ts.registerCallback(self.lidars_callback)
-        self.accumulated_points = []
 
         # Publisher for accumulated 3D bale point cloud
         self.pub = self.create_publisher(PointCloud2, '/bale/reconstruction', 10)
@@ -54,26 +72,14 @@ class BaleReconstructor(Node):
 
         # State
         self.t0: Optional[float] = None
+        self.start_time: Optional[float] = None
         self.accumulated_points: List[List[float]] = []
-        self.static_points: Optional[np.ndarray] = None
+        
+        # Static map for filtering
         self.static_kdtree: Optional[cKDTree] = None
+        self.static_map_ready = False
 
         self.get_logger().info("Bale 3D Reconstructor Node Initialized")
-
-    @staticmethod
-    def rotation_matrix(roll: float = 0.0, pitch: float = 0.0, yaw: float = 0.0) -> np.ndarray:
-        """Return rotation matrix from Euler angles (Z-Y-X order)."""
-        cos, sin = np.cos, np.sin
-        Rx = np.array([[1, 0, 0],
-                       [0, cos(roll), -sin(roll)],
-                       [0, sin(roll), cos(roll)]])
-        Ry = np.array([[cos(pitch), 0, sin(pitch)],
-                       [0, 1, 0],
-                       [-sin(pitch), 0, cos(pitch)]])
-        Rz = np.array([[cos(yaw), -sin(yaw), 0],
-                       [sin(yaw), cos(yaw), 0],
-                       [0, 0, 1]])
-        return Rz @ Ry @ Rx
 
     @staticmethod
     def structured_to_array(points) -> np.ndarray:
@@ -83,60 +89,57 @@ class BaleReconstructor(Node):
             dtype=np.float64
         )
 
+    def static_map_callback(self, cloud_msg: PointCloud2):
+        """Receive and build KD-tree from static map."""
+        if self.static_kdtree is not None:
+            return  # Already received
 
-    def filter_static_points(self, new_points: np.ndarray) -> np.ndarray:
-        if new_points.shape[0] == 0:
-            return new_points
+        static_points = self.structured_to_array(
+            point_cloud2.read_points(cloud_msg, skip_nans=True)
+        )
 
-        current_time = self.get_clock().now().nanoseconds * 1e-9
-        elapsed = current_time - self.start_time
+        if static_points.shape[0] > 0:
+            self.static_kdtree = cKDTree(static_points[:, :3])
+            self.get_logger().info(
+                f"Static map received: {len(static_points):,} points. KD-tree built."
+            )
 
-        # === PHASE 1: Learn static background (once at startup) ===
-        if elapsed < self.STATIC_LEARNING_TIME:                                      # ← adjust if needed
-            if not hasattr(self, 'static_kdtree') or self.static_kdtree is None:
-                self.static_points = new_points.copy()
-                self.static_kdtree = cKDTree(self.static_points[:, :3])
-                self.get_logger().info("Static background learning started")
-            else:
-                self.static_points = np.vstack([self.static_points, new_points])
-                # Gentle downsampling to keep tree fast
-                if len(self.static_points) > 1_000_000:
-                    self.static_points = self.static_points[::2]
-                self.static_kdtree = cKDTree(self.static_points[:, :3])
+    def static_ready_callback(self, msg: Bool):
+        """Receive signal that static map is ready."""
+        if msg.data:
+            self.static_map_ready = True
+            self.get_logger().info("Static map is ready for filtering")
 
-            remaining = max(0, self.STATIC_LEARNING_TIME - elapsed)
-            self.get_logger().info(f"Learning static map: {len(self.static_points):,} pts | {remaining:.1f}s left")
-            return new_points                                           # ← no filtering yet
+    def filter_static_points(self, points: np.ndarray) -> np.ndarray:
+        """Filter out static points using the static map KD-tree."""
+        if points.shape[0] == 0:
+            return points
 
-        # === PHASE 2: Frozen static map – real filtering ===
-        if self.static_kdtree is None:
-            self.get_logger().warn("No static map learned → passing all points")
-            return new_points
+        if not self.static_map_ready or self.static_kdtree is None:
+            # Static map not ready yet, pass through all points
+            return points
 
-        distances, _ = self.static_kdtree.query(new_points[:, :3], k=1, n_jobs=-1)
-        dynamic_mask = distances > 0.10                                 # ← 10 cm works perfectly
-        return new_points[dynamic_mask]
-
-    @staticmethod
-    def displace_and_rotate_points(points: List[list], dx: float, R: np.ndarray) -> List[list]:
-        """Apply rotation then translation along X-axis to a list of points."""
-        transformed = []
-        for p in points:
-            xyz = np.array(p[:3])
-            xyz = R @ xyz           # Rotate
-            xyz[0] += dx            # Translate along conveyor direction
-            transformed.append(list(xyz) + p[3:])
-        return transformed
+        # Query KD-tree to find nearest static point for each input point
+        distances, _ = self.static_kdtree.query(points[:, :3], k=1, n_jobs=-1)
+        
+        # Keep only points far enough from static map (dynamic points)
+        dynamic_mask = distances > self.DISTANCE_THRESHOLD
+        return points[dynamic_mask]
 
     def lidars_callback(self, left_cloud: PointCloud2, right_cloud: PointCloud2):
+        """Merge, filter, and reconstruct bale from synchronized lidar data."""
         try:
             left_stamp  = left_cloud.header.stamp
             right_stamp = right_cloud.header.stamp
 
-            tf_left  = self.tf_buffer.lookup_transform('map', left_cloud.header.frame_id,  left_stamp,
-                                                    timeout=rclpy.duration.Duration(seconds=0.1))
-            tf_right = self.tf_buffer.lookup_transform('map', right_cloud.header.frame_id, right_stamp,
-                                                    timeout=rclpy.duration.Duration(seconds=0.1))
+            tf_left  = self.tf_buffer.lookup_transform(
+                'map', left_cloud.header.frame_id, left_stamp,
+                timeout=rclpy.duration.Duration(seconds=0.1)
+            )
+            tf_right = self.tf_buffer.lookup_transform(
+                'map', right_cloud.header.frame_id, right_stamp,
+                timeout=rclpy.duration.Duration(seconds=0.1)
+            )
 
             left_map  = tf2_sensor_msgs.do_transform_cloud(left_cloud,  tf_left)
             right_map = tf2_sensor_msgs.do_transform_cloud(right_cloud, tf_right)
@@ -158,38 +161,42 @@ class BaleReconstructor(Node):
             self.t0 = t_left
             self.start_time = self.get_clock().now().nanoseconds * 1e-9
 
-        # === 1. Merge clouds in map frame WITHOUT any motion compensation yet ===
+        # === 1. Merge clouds in map frame WITHOUT motion compensation ===
         merged = []
         if pts_left.shape[0] > 0:
             merged.append(pts_left)
         if pts_right.shape[0] > 0:
             pts_r = pts_right.copy()
-            pts_r[:, 1] += self.RIGHT_LIDAR_Y_OFFSET   # only lateral offset
+            pts_r[:, 1] += self.RIGHT_LIDAR_Y_OFFSET   # lateral offset
             pts_r[:, 0] -= self.RIGHT_LIDAR_Y_OFFSET
             merged.append(pts_r)
 
         if not merged:
             return
+        
         all_points = np.vstack(merged)
 
         # Light ground filter
         all_points = all_points[all_points[:, 2] > 0.02]
 
-        # === 2. Static / dynamic separation (static map is always at t=0 coordinates) ===
+        # Publish merged cloud (for static map builder during learning phase)
+        merged_cloud = point_cloud2.create_cloud(
+            header=left_map.header,
+            fields=left_map.fields,
+            points=all_points.tolist()
+        )
+        self.merged_pub.publish(merged_cloud)
+
+        # === 2. Filter static points using received static map ===
         dynamic_points = self.filter_static_points(all_points)
 
-        # === 3. ONLY NOW apply conveyor motion compensation to the dynamic (bale) points ===
-        if dynamic_points.shape[0] > 0:
-            current_time = self.get_clock().now().nanoseconds * 1e-9
-            elapsed_since_start = current_time - self.start_time
+        # === 3. Apply conveyor motion compensation to dynamic points ===
+        if dynamic_points.shape[0] > 0 and self.static_map_ready:
+            t_avg = (t_left + t_right) / 2.0
+            dx = -self.CONVEYOR_VELOCITY * (t_avg - self.t0)
+            dynamic_points[:, 0] += dx   # shift bale points backward
 
-            if elapsed_since_start > self.STATIC_LEARNING_TIME:   # learning phase finished
-                # Use average timestamp of the two clouds for compensation
-                t_avg = (t_left + t_right) / 2.0
-                dx = -self.CONVEYOR_VELOCITY * (t_avg - self.t0)
-                dynamic_points[:, 0] += dx   # shift bale points backward
-
-        # === 4. Accumulate & publish ===
+        # === 4. Accumulate and publish reconstruction ===
         if dynamic_points.shape[0] > 0:
             self.accumulated_points.extend(dynamic_points.tolist())
 
@@ -200,11 +207,14 @@ class BaleReconstructor(Node):
             )
             self.pub.publish(out_cloud)
 
-            self.get_logger().info(f"Bale cloud: {len(self.accumulated_points):,} pts "
-                                f"(+{len(dynamic_points)} new)")
-            
+            filtered_count = all_points.shape[0] - dynamic_points.shape[0]
+            self.get_logger().info(
+                f"Bale cloud: {len(self.accumulated_points):,} pts "
+                f"(+{len(dynamic_points)} new, {filtered_count} filtered)"
+            )
+        
         # === Time-based finished detection ===
-        if not self.bale_finished:
+        if not self.bale_finished and self.start_time is not None:
             current_time = self.get_clock().now().nanoseconds * 1e-9
             elapsed = current_time - self.start_time
             if elapsed > self.SCAN_DURATION:
@@ -213,6 +223,8 @@ class BaleReconstructor(Node):
                 done_msg.data = True
                 self.done_pub.publish(done_msg)
                 self.get_logger().info(f"Bale finished scanning (elapsed {elapsed:.1f}s)")
+
+
 def main(args=None):
     rclpy.init(args=args)
     node = BaleReconstructor()

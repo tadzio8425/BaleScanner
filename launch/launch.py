@@ -58,6 +58,11 @@ def generate_launch_description():
         executable='trigger_static'
     )
 
+    static_map_publisher = Node(
+        package='bale_scanner',
+        executable='static_map_publisher'
+    )
+
     #Services
     ld.add_action(static_service)
 
@@ -65,7 +70,10 @@ def generate_launch_description():
     ld.add_action(map_tf)
     ld.add_action(left_tf)
     ld.add_action(right_tf)
+
+    ld.add_action(static_map_publisher)
     ld.add_action(bale_reconstructor)
     ld.add_action(bale_isolator)
+
 
     return ld

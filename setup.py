@@ -26,7 +26,8 @@ setup(
         'console_scripts': [
             'test = bale_scanner.test:main',
             'bale_reconstructor = bale_scanner.bale_reconstructor:main',
-            'bale_visualizer = bale_scanner.bale_visualizer:main'
+            'bale_isolator = bale_scanner.bale_isolator:main',
+            'trigger_static = bale_scanner.trigger_static:main'
         ],
     },
 )

@@ -46,16 +46,26 @@ def generate_launch_description():
         executable='bale_reconstructor'
     )
     # Start the visualizer node 
-    bale_visualizer = Node(
+    bale_isolator = Node(
         package='bale_scanner',
-        executable='bale_visualizer'
+        executable='bale_isolator'
     )
+
+
+    # Start the static mapper node
+    static_service = Node(
+        package='bale_scanner',
+        executable='trigger_static'
+    )
+
+    #Services
+    ld.add_action(static_service)
 
     # Add actions in order
     ld.add_action(map_tf)
     ld.add_action(left_tf)
     ld.add_action(right_tf)
     ld.add_action(bale_reconstructor)
-    ld.add_action(bale_visualizer)
+    ld.add_action(bale_isolator)
 
     return ld
